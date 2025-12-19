@@ -1,0 +1,191 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Viewer Report - /hls/NMT.m3u8</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body {
+                margin: 0;
+                background: radial-gradient(circle at top left, #0b1120, #020617 55%);
+                font-family: system-ui, sans-serif;
+                color: #e5e7eb;
+            }
+            .page {
+                max-width: 1200px;
+                margin: auto;
+                padding: 24px;
+            }
+            .header {
+                display: flex;
+                justify-content: space-between;
+                padding: 16px;
+                border-radius: 16px;
+                border: 1px solid #1f2937;
+                background: linear-gradient(135deg, rgba(59,130,246,0.2), rgba(15,23,42,0.8));
+                margin-bottom: 24px;
+            }
+            .grid-3 {
+                display: grid;
+                grid-template-columns: repeat(3,1fr);
+                gap: 16px;
+                margin-bottom: 24px;
+            }
+            .card {
+                padding: 16px;
+                border-radius: 14px;
+                border: 1px solid #1f2937;
+                background: rgba(148,163,184,0.08);
+            }
+            .kpi-label { font-size: 12px; color: #9ca3af; }
+            .kpi-value { font-size: 26px; font-weight: 600; }
+            .kpi-sub { color: #9ca3af; font-size: 12px; }
+            .flex { display: flex; gap: 16px; }
+            .panel {
+                flex: 2;
+                padding: 16px;
+                border-radius: 16px;
+                border: 1px solid #1f2937;
+                background: rgba(30,64,175,0.15);
+            }
+            .panel-soft {
+                flex: 1;
+                padding: 16px;
+                border-radius: 16px;
+                border: 1px solid #1f2937;
+                background: rgba(148,163,184,0.08);
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 16px;
+            }
+            th, td {
+                border: 1px solid #1f2937;
+                padding: 8px;
+                font-size: 13px;
+                text-align: center;
+            }
+            th {
+                background: #0f172a;
+                color: #9ca3af;
+            }
+        </style>
+    </head>
+
+    <body>
+    <div class="page">
+
+        <div class="header">
+            <div>
+                <div style="font-size:24px;font-weight:600;">HLS Viewer & Bot Report</div>
+                <div style="color:#9ca3af;">Stream: /hls/NMT.m3u8</div>
+            </div>
+            <div style="font-size:12px;color:#9ca3af;">Generated at: 2025-12-19 09:39:20</div>
+        </div>
+
+        <div class="grid-3">
+            <div class="card">
+                <div class="kpi-label">Latest viewers</div>
+                <div class="kpi-value">1</div>
+                <div class="kpi-sub">Max: 1 · Avg: 1.0</div>
+            </div>
+
+            <div class="card">
+                <div class="kpi-label">Bot activity</div>
+                <div class="kpi-value">0</div>
+                <div class="kpi-sub">Latest: 0.0% · Avg: 0.0%</div>
+            </div>
+
+            <div class="card">
+                <div class="kpi-label">Unique IPs</div>
+                <div class="kpi-value">0</div>
+                <div class="kpi-sub">Window: 30s · Th: 50</div>
+            </div>
+        </div>
+
+        <div class="flex">
+            <div class="panel">
+                <canvas id="chart" height="120"></canvas>
+            </div>
+
+            <div class="panel-soft">
+                <div style="font-size:16px;margin-bottom:10px;">Config</div>
+                API Base: http://139.59.166.217:8000<br>
+                Stream Key: /hls/NMT.m3u8<br>
+                Window: 30s<br>
+                Bot Threshold: 50<br>
+                Checks: 1<br>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Viewers</th>
+                    <th>Bots</th>
+                    <th>IPs</th>
+                    <th>Window</th>
+                    <th>Threshold</th>
+                </tr>
+            </thead>
+            <tbody>
+                
+        <tr>
+            <td>2025-12-19 09:39:20</td>
+            <td>1</td>
+            <td>0</td>
+            <td>0</td>
+            <td>30</td>
+            <td>50</td>
+        </tr>
+        
+            </tbody>
+        </table>
+
+    </div>
+
+    <script>
+        const labels = ["2025-12-19 09:39:20"];
+        const viewers = [1];
+        const bots = [0];
+
+        new Chart(document.getElementById("chart"), {
+            type: "line",
+            data: {
+                labels: labels,
+                datasets: [
+                    {
+                        label: "Viewers",
+                        data: viewers,
+                        borderColor: "rgba(59,130,246,1)",
+                        backgroundColor: "rgba(59,130,246,0.15)",
+                        borderWidth: 2,
+                        tension: 0.25
+                    },
+                    {
+                        label: "Bots",
+                        data: bots,
+                        borderColor: "rgba(249,115,22,1)",
+                        backgroundColor: "rgba(249,115,22,0.15)",
+                        borderWidth: 2,
+                        tension: 0.25
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { labels: { color: "#e5e7eb" } } },
+                scales: {
+                    x: { ticks: { color: "#9ca3af" } },
+                    y: { ticks: { color: "#9ca3af" }, beginAtZero: true }
+                }
+            }
+        });
+    </script>
+
+    </body>
+    </html>
+    
