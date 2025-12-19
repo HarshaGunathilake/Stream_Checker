@@ -1,561 +1,383 @@
-import os
-import json
+# dashboard.py
 import time
-from datetime import datetime
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Tuple, Optional
 
-import pandas as pd
 import requests
+import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
-# ---------- BASIC SETUP ----------
-REPORTS_DIR = "reports"
-os.makedirs(REPORTS_DIR, exist_ok=True)
+st.set_page_config(
+    page_title="Nginx HLS Viewer + Bot Monitor",
+    page_icon="📺",
+    layout="wide",
+)
 
-st.set_page_config(page_title="Live Viewer + Bot Monitor", layout="wide")
-
-# Hide Streamlit main menu / deploy bar
+# -----------------------------
+# Small UI polish
+# -----------------------------
 st.markdown(
     """
     <style>
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    div[data-testid="stToolbar"] {display: none;}
+      .card {
+        border: 1px solid rgba(148,163,184,0.18);
+        background: rgba(2,6,23,0.35);
+        padding: 16px 18px;
+        border-radius: 18px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.22);
+      }
+      .muted { color: rgba(148,163,184,0.9); font-size: 0.95rem; }
+      .big  { font-size: 1.25rem; font-weight: 700; }
+      .pill {
+        display:inline-block; padding: 4px 10px; border-radius: 999px;
+        border: 1px solid rgba(148,163,184,0.22);
+        background: rgba(15,23,42,0.55);
+        font-size: 12px; margin-left: 6px;
+      }
+      .ok { color: #22c55e; }
+      .bad { color: #ef4444; }
+      .warn { color: #f59e0b; }
+      .small { font-size: 12px; color: rgba(148,163,184,0.9); }
+      hr { border: none; border-top: 1px solid rgba(148,163,184,0.14); margin: 12px 0; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Professional UI CSS
-st.markdown(
-"""
-<style>
-  div[data-testid="stVerticalBlockBorderWrapper"]{
-    border: 1px solid rgba(148,163,184,0.16) !important;
-    background: rgba(2,6,23,0.35) !important;
-    border-radius: 18px !important;
-    padding: 18px !important;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.25) !important;
-  }
-  .muted { color: #94a3b8; font-size: 0.9rem; }
-  .section-title { font-size: 1.05rem; font-weight: 650; margin-bottom: 10px; }
-  .pill {
-    display: inline-block;
-    padding: 4px 10px;
-    border-radius: 999px;
-    border: 1px solid rgba(148,163,184,0.18);
-    background: rgba(15,23,42,0.55);
-    font-size: 0.85rem;
-    color: #cbd5e1;
-  }
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# Session state
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "last_data" not in st.session_state:
-    st.session_state.last_data = None
-if "last_stream_key" not in st.session_state:
-    st.session_state.last_stream_key = None
-if "last_api_base" not in st.session_state:
-    st.session_state.last_api_base = None
-if "last_report_html" not in st.session_state:
-    st.session_state.last_report_html = None
-if "last_report_name" not in st.session_state:
-    st.session_state.last_report_name = None
-
-
-# ---------- HELPERS ----------
-def extract_stream_key(url: str) -> str:
-    """
-    Accepts:
-      - Full URL:  https://domain.com/hls/NMT.m3u8
-      - Path:      /hls/NMT.m3u8
-      - Relative:  hls/NMT.m3u8
-    Returns:
-      - Normalized path: /hls/NMT.m3u8
-    """
+# -----------------------------
+# Helpers
+# -----------------------------
+def normalize_base_url(url: str) -> str:
     url = (url or "").strip()
     if not url:
-        return "/"
-
-    parsed = urlparse(url)
-    if parsed.scheme and parsed.netloc:
-        path = parsed.path or "/"
-    else:
-        path = url
-
-    if not path.startswith("/"):
-        path = "/" + path
-
-    return path
+        return "http://127.0.0.1:8000"
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "http://" + url
+    return url.rstrip("/")
 
 
-def get_viewer_data(api_base: str, stream_key: str, window_seconds: int, bot_threshold: int):
-    url = api_base.rstrip("/") + "/api/nginx/viewers"
-    params = {
-        "stream_key": stream_key,
-        "window_seconds": window_seconds,
-        "bot_threshold": bot_threshold,
-    }
-    resp = requests.get(url, params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+def safe_json(resp: requests.Response) -> Dict[str, Any]:
+    try:
+        return resp.json()
+    except Exception:
+        return {"error": f"Non-JSON response (status={resp.status_code})", "text": resp.text[:500]}
 
 
-def render_hls_player(m3u8_url: str, height: int = 420):
+def api_get(
+    base_url: str,
+    path: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: Tuple[int, int] = (5, 120),
+    retries: int = 2,
+    backoff: float = 1.2,
+) -> Tuple[int, Dict[str, Any]]:
     """
-    HLS player using hls.js (works for .m3u8 in most browsers).
-    Note:
-      - Autoplay may be blocked unless muted.
-      - If your Streamlit site is HTTPS and stream is HTTP, the browser may block it (mixed content).
+    Returns (status_code, json_dict)
     """
-    m3u8_url = (m3u8_url or "").strip()
-    if not m3u8_url:
-        components.html("<div class='muted'>No stream URL provided.</div>", height=60)
-        return
-
-    html = f"""
-    <div style="width:100%; height:{height}px; border-radius:18px; overflow:hidden; border:1px solid rgba(148,163,184,0.16); background:rgba(2,6,23,0.35);">
-      <video id="video" controls playsinline muted
-        style="width:100%; height:100%; object-fit:contain; background:#000;"></video>
-    </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <script>
-      const video = document.getElementById('video');
-      const src = {json.dumps(m3u8_url)};
-
-      function load() {{
-        if (Hls.isSupported()) {{
-          const hls = new Hls({{
-            lowLatencyMode: true,
-            enableWorker: true,
-            backBufferLength: 30
-          }});
-          hls.loadSource(src);
-          hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, function() {{
-            video.play().catch(() => {{}});
-          }});
-        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
-          video.src = src;
-          video.addEventListener('loadedmetadata', function() {{
-            video.play().catch(() => {{}});
-          }});
-        }} else {{
-          video.outerHTML = "<div style='padding:14px;color:#cbd5e1;font-family:system-ui;'>HLS not supported in this browser.</div>";
-        }}
-      }}
-
-      load();
-    </script>
-    """
-    components.html(html, height=height + 30, scrolling=False)
-
-
-# ---------- ADVANCED HTML REPORT ----------
-def generate_html_report(df: pd.DataFrame, stream_key: str, api_base: str) -> str:
-    if df.empty:
-        return "<html><body><h2>No data available.</h2></body></html>"
-
-    df = df.copy()
-    df["viewers"] = df["viewers"].astype(int)
-    df["bot_count"] = df["bot_count"].astype(int)
-    df["total_unique_ips"] = df["total_unique_ips"].astype(int)
-
-    latest = df.iloc[-1]
-
-    max_viewers = int(df["viewers"].max())
-    avg_viewers = float(df["viewers"].mean())
-    max_bots = int(df["bot_count"].max())
-    avg_bots = float(df["bot_count"].mean())
-
-    latest_viewers = int(latest["viewers"])
-    latest_bots = int(latest["bot_count"])
-    latest_ips = int(latest["total_unique_ips"])
-
-    bot_ratio_latest = (latest_bots / latest_ips * 100) if latest_ips > 0 else 0.0
-    avg_ips = df["total_unique_ips"].mean()
-    bot_ratio_avg = (avg_bots / avg_ips * 100) if avg_ips > 0 else 0.0
-
-    window_seconds = int(latest["window_seconds"])
-    bot_threshold = int(latest["bot_threshold"])
-
-    labels = df["time"].tolist()
-    viewers_series = df["viewers"].tolist()
-    bots_series = df["bot_count"].tolist()
-
-    labels_json = json.dumps(labels)
-    viewers_json = json.dumps(viewers_series)
-    bots_json = json.dumps(bots_series)
-
-    rows_html = ""
-    for _, row in df.iterrows():
-        rows_html += f"""
-        <tr>
-            <td>{row['time']}</td>
-            <td>{int(row['viewers'])}</td>
-            <td>{int(row['bot_count'])}</td>
-            <td>{int(row['total_unique_ips'])}</td>
-            <td>{int(row['window_seconds'])}</td>
-            <td>{int(row['bot_threshold'])}</td>
-        </tr>
-        """
-
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Viewer Report - {stream_key}</title>
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-        <style>
-            body {{
-                margin: 0;
-                background: radial-gradient(circle at top left, #0b1120, #020617 55%);
-                font-family: system-ui, sans-serif;
-                color: #e5e7eb;
-            }}
-            .page {{
-                max-width: 1200px;
-                margin: auto;
-                padding: 24px;
-            }}
-            .header {{
-                display: flex;
-                justify-content: space-between;
-                padding: 16px;
-                border-radius: 16px;
-                border: 1px solid #1f2937;
-                background: linear-gradient(135deg, rgba(59,130,246,0.2), rgba(15,23,42,0.8));
-                margin-bottom: 24px;
-            }}
-            .grid-3 {{
-                display: grid;
-                grid-template-columns: repeat(3,1fr);
-                gap: 16px;
-                margin-bottom: 24px;
-            }}
-            .card {{
-                padding: 16px;
-                border-radius: 14px;
-                border: 1px solid #1f2937;
-                background: rgba(148,163,184,0.08);
-            }}
-            .kpi-label {{ font-size: 12px; color: #9ca3af; }}
-            .kpi-value {{ font-size: 26px; font-weight: 600; }}
-            .kpi-sub {{ color: #9ca3af; font-size: 12px; }}
-            .flex {{ display: flex; gap: 16px; }}
-            .panel {{
-                flex: 2;
-                padding: 16px;
-                border-radius: 16px;
-                border: 1px solid #1f2937;
-                background: rgba(30,64,175,0.15);
-            }}
-            .panel-soft {{
-                flex: 1;
-                padding: 16px;
-                border-radius: 16px;
-                border: 1px solid #1f2937;
-                background: rgba(148,163,184,0.08);
-            }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 16px;
-            }}
-            th, td {{
-                border: 1px solid #1f2937;
-                padding: 8px;
-                font-size: 13px;
-                text-align: center;
-            }}
-            th {{
-                background: #0f172a;
-                color: #9ca3af;
-            }}
-        </style>
-    </head>
-
-    <body>
-    <div class="page">
-
-        <div class="header">
-            <div>
-                <div style="font-size:24px;font-weight:600;">HLS Viewer & Bot Report</div>
-                <div style="color:#9ca3af;">Stream: {stream_key}</div>
-            </div>
-            <div style="font-size:12px;color:#9ca3af;">Generated at: {latest['time']}</div>
-        </div>
-
-        <div class="grid-3">
-            <div class="card">
-                <div class="kpi-label">Latest viewers</div>
-                <div class="kpi-value">{latest_viewers}</div>
-                <div class="kpi-sub">Max: {max_viewers} · Avg: {avg_viewers:.1f}</div>
-            </div>
-
-            <div class="card">
-                <div class="kpi-label">Bot activity</div>
-                <div class="kpi-value">{latest_bots}</div>
-                <div class="kpi-sub">Latest: {bot_ratio_latest:.1f}% · Avg: {bot_ratio_avg:.1f}%</div>
-            </div>
-
-            <div class="card">
-                <div class="kpi-label">Unique IPs</div>
-                <div class="kpi-value">{latest_ips}</div>
-                <div class="kpi-sub">Window: {window_seconds}s · Th: {bot_threshold}</div>
-            </div>
-        </div>
-
-        <div class="flex">
-            <div class="panel">
-                <canvas id="chart" height="120"></canvas>
-            </div>
-
-            <div class="panel-soft">
-                <div style="font-size:16px;margin-bottom:10px;">Config</div>
-                API Base: {api_base}<br>
-                Stream Key: {stream_key}<br>
-                Window: {window_seconds}s<br>
-                Bot Threshold: {bot_threshold}<br>
-                Checks: {len(df)}<br>
-            </div>
-        </div>
-
-        <table>
-            <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Viewers</th>
-                    <th>Bots</th>
-                    <th>IPs</th>
-                    <th>Window</th>
-                    <th>Threshold</th>
-                </tr>
-            </thead>
-            <tbody>
-                {rows_html}
-            </tbody>
-        </table>
-
-    </div>
-
-    <script>
-        const labels = {labels_json};
-        const viewers = {viewers_json};
-        const bots = {bots_json};
-
-        new Chart(document.getElementById("chart"), {{
-            type: "line",
-            data: {{
-                labels: labels,
-                datasets: [
-                    {{
-                        label: "Viewers",
-                        data: viewers,
-                        borderColor: "rgba(59,130,246,1)",
-                        backgroundColor: "rgba(59,130,246,0.15)",
-                        borderWidth: 2,
-                        tension: 0.25
-                    }},
-                    {{
-                        label: "Bots",
-                        data: bots,
-                        borderColor: "rgba(249,115,22,1)",
-                        backgroundColor: "rgba(249,115,22,0.15)",
-                        borderWidth: 2,
-                        tension: 0.25
-                    }}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{ legend: {{ labels: {{ color: "#e5e7eb" }} }} }},
-                scales: {{
-                    x: {{ ticks: {{ color: "#9ca3af" }} }},
-                    y: {{ ticks: {{ color: "#9ca3af" }}, beginAtZero: true }}
-                }}
-            }}
-        }});
-    </script>
-
-    </body>
-    </html>
-    """
-    return html
-
-
-# ---------- HEADER ----------
-st.title("📺 Live Viewer + Bot Monitor")
-st.caption("Manual viewer check with a user-controlled minimum run time before showing results.")
-
-# ---------- TWO-PANE LAYOUT ----------
-left, right = st.columns([0.95, 1.25], gap="large")
-
-# ---------------- LEFT: SETTINGS ----------------
-with left:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>API Server</div>", unsafe_allow_html=True)
-
-    api_mode = st.radio("Host type", ["IP address", "Domain"], horizontal=True)
-    protocol = st.selectbox("Protocol", ["http", "https"])
-    port = st.number_input("Port", 1, 65535, 8000)
-
-    if api_mode == "IP address":
-        host = st.text_input("Server IP", value="139.59.166.217")
-    else:
-        host = st.text_input("Domain", value="rtmp1.vodhosting.com")
-
-    api_base = f"{protocol}://{host}:{port}"
-    st.markdown(f"<span class='pill'>API Base: {api_base}</span>", unsafe_allow_html=True)
-
-    st.markdown("<hr style='border:0;border-top:1px solid rgba(148,163,184,0.12);margin:16px 0;'>", unsafe_allow_html=True)
-
-    st.markdown("<div class='section-title'>Stream Settings</div>", unsafe_allow_html=True)
-    stream_input = st.text_input("Stream URL or key", value="https://rtmp1.vodhosting.com/hls/NMT.m3u8")
-
-    window_seconds = st.selectbox(
-        "Time Window (how far back to count viewers)",
-        [30, 60, 120, 300],
-        index=0,
-    )
-
-    bot_threshold = st.number_input("Bot threshold (requests per window)", 5, 5000, 50)
-
-    run_duration = st.number_input(
-        "Minimum run time before showing results (seconds)",
-        min_value=10,
-        max_value=120,
-        value=10,
-        step=1,
-    )
-
-    st.markdown("<hr style='border:0;border-top:1px solid rgba(148,163,184,0.12);margin:16px 0;'>", unsafe_allow_html=True)
-
-    run = st.button("Run Viewer Check", use_container_width=True)
-
-    st.markdown(
-        "<div class='muted'>Note: If Streamlit is HTTPS and the stream is HTTP, browser may block playback (mixed content).</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------- RIGHT: PLAYER + RESULTS ----------------
-with right:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title'>Live Preview</div>", unsafe_allow_html=True)
-
-    render_hls_player(stream_input, height=420)
-
-    # ---- Manual run only ----
-    if run:
-        stream_key = extract_stream_key(stream_input)
-
-        # Running alert + progress (minimum run time)
-        alert_box = st.warning(f"Running… collecting for at least {int(run_duration)} seconds", icon="⏳")
-        progress = st.progress(0, text="Starting…")
-
-        total = int(run_duration)
-        for i in range(total):
-            pct = int(((i + 1) / total) * 100)
-            remaining = total - (i + 1)
-            progress.progress(pct, text=f"Collecting… {remaining}s remaining")
-            time.sleep(1)
-
-        progress.empty()
-        alert_box.empty()
-
-        fetching_box = st.info("Fetching results from API…", icon="📡")
+    url = f"{normalize_base_url(base_url)}{path}"
+    last_err = None
+    for i in range(retries + 1):
         try:
-            data = get_viewer_data(api_base, stream_key, window_seconds, bot_threshold)
-        except Exception as e:
-            fetching_box.empty()
-            st.error(f"API Error: {e}")
-            st.stop()
-        fetching_box.empty()
+            r = requests.get(url, params=params, timeout=timeout)
+            return r.status_code, safe_json(r)
+        except requests.exceptions.RequestException as e:
+            last_err = str(e)
+            if i < retries:
+                time.sleep(backoff * (i + 1))
+    return 0, {"error": f"Request failed: {last_err}", "url": url}
 
-        st.success("Viewer check complete ✅", icon="✅")
 
-        # Normalize fields (your API may return unique_ips list but not total_unique_ips)
-        unique_ips = data.get("unique_ips", []) or []
-        total_unique_ips = data.get("total_unique_ips", None)
-        if total_unique_ips is None:
-            total_unique_ips = len(unique_ips)
+@st.cache_data(ttl=10, show_spinner=False)
+def cached_api_get(
+    base_url: str,
+    path: str,
+    params_items: Tuple[Tuple[str, Any], ...],
+    timeout: Tuple[int, int],
+    retries: int,
+) -> Tuple[int, Dict[str, Any]]:
+    params = dict(params_items)
+    return api_get(base_url, path, params=params, timeout=timeout, retries=retries)
 
-        # Persist last run
-        st.session_state.last_data = data
-        st.session_state.last_stream_key = stream_key
-        st.session_state.last_api_base = api_base
 
-        # Save entry to history
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        entry = {
-            "time": now,
-            "stream_key": stream_key,
-            "viewers": int(data.get("approx_viewers", 0)),
-            "bot_count": int(data.get("bot_count", 0)),
-            "total_unique_ips": int(total_unique_ips),
-            "window_seconds": int(window_seconds),
-            "bot_threshold": int(bot_threshold),
+def flatten_sessions(sessions: List[Dict[str, Any]], threshold: float) -> pd.DataFrame:
+    rows: List[Dict[str, Any]] = []
+    for s in sessions or []:
+        feats = s.get("features") or {}
+        ip = s.get("client_ip") or s.get("ip") or ""
+        ua = s.get("ua") or ""
+        prob = s.get("bot_probability")
+        try:
+            prob_f = float(prob) if prob is not None else None
+        except Exception:
+            prob_f = None
+
+        row = {
+            "ip": ip,
+            "ua": ua,
+            "bot_probability": prob_f,
         }
-        st.session_state.history.append(entry)
+        # add feature columns
+        for k, v in feats.items():
+            row[k] = v
+        # derived label
+        if prob_f is None:
+            row["label"] = "unknown"
+        else:
+            row["label"] = "bot" if prob_f >= threshold else "real"
 
-        # Generate report (stream-specific)
-        df = pd.DataFrame(st.session_state.history)
-        df_stream = df[df["stream_key"] == stream_key]
+        rows.append(row)
 
-        html = generate_html_report(df_stream, stream_key, api_base)
-        safe_key = stream_key.strip("/").replace("/", "_")
-        filename = f"report_{safe_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
-        filepath = os.path.join(REPORTS_DIR, filename)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(html)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
 
-        st.session_state.last_report_html = html
-        st.session_state.last_report_name = filename
+    # nicer ordering if columns exist
+    preferred = [
+        "label", "bot_probability", "ip", "ua",
+        "req_count", "m3u8_count", "ts_count",
+        "m3u8_ts_ratio", "rps", "duration_s",
+        "gap_mean", "gap_p50", "gap_p95",
+        "err_rate", "status_4xx", "status_5xx",
+        "rt_avg", "rt_p95", "bytes_avg", "bytes_sum"
+    ]
+    cols = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
+    df = df[cols]
 
-        st.success(f"Report saved: `{filepath}`")
+    # sorting
+    if "bot_probability" in df.columns:
+        df = df.sort_values(by="bot_probability", ascending=False, na_position="last")
+    return df
 
-    # Show last results (if any)
-    if st.session_state.last_data:
-        data = st.session_state.last_data
-        unique_ips = data.get("unique_ips", []) or []
-        total_unique_ips = data.get("total_unique_ips", None)
-        if total_unique_ips is None:
-            total_unique_ips = len(unique_ips)
 
-        st.markdown("<hr style='border:0;border-top:1px solid rgba(148,163,184,0.12);margin:16px 0;'>", unsafe_allow_html=True)
-        st.markdown("<div class='section-title'>Results</div>", unsafe_allow_html=True)
+# -----------------------------
+# Sidebar controls
+# -----------------------------
+st.sidebar.title("⚙️ Settings")
 
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Viewers", int(data.get("approx_viewers", 0)))
-        k2.metric("Bots", int(data.get("bot_count", 0)))
-        k3.metric("Unique IPs", int(total_unique_ips))
+base_url = st.sidebar.text_input(
+    "API Base URL",
+    value=st.session_state.get("base_url", "http://139.59.166.217:8000"),
+    help="Example: http://139.59.166.217:8000 (make sure port 8000 is reachable from your PC)",
+)
+base_url = normalize_base_url(base_url)
+st.session_state["base_url"] = base_url
 
-        with st.expander("Raw API Response", expanded=False):
-            st.json(data)
+stream_key = st.sidebar.text_input("stream_key", value="/hls/NMT.m3u8")
+window_seconds = st.sidebar.number_input("window_seconds", min_value=30, max_value=86400, value=7200, step=30)
+tail_lines = st.sidebar.number_input("tail_lines", min_value=1000, max_value=5000000, value=800000, step=10000)
+limit = st.sidebar.number_input("limit", min_value=1, max_value=20000, value=5000, step=50)
 
-        if st.session_state.last_report_html and st.session_state.last_report_name:
-            st.download_button(
-                "Download Report",
-                data=st.session_state.last_report_html,
-                file_name=st.session_state.last_report_name,
-                mime="text/html",
-                use_container_width=True,
-            )
+st.sidebar.markdown("---")
+threshold = st.sidebar.slider("Bot threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.05)
+connect_timeout = st.sidebar.number_input("Connect timeout (s)", min_value=1, max_value=30, value=5, step=1)
+read_timeout = st.sidebar.number_input("Read timeout (s)", min_value=5, max_value=600, value=120, step=5)
+retries = st.sidebar.number_input("Retries", min_value=0, max_value=5, value=2, step=1)
 
+st.sidebar.markdown("---")
+refresh = st.sidebar.button("🔄 Refresh now")
+
+# Filters
+st.sidebar.subheader("Filters")
+label_filter = st.sidebar.multiselect("Label", ["bot", "real", "unknown"], default=["bot", "real", "unknown"])
+min_prob = st.sidebar.slider("Min probability", 0.0, 1.0, 0.0, 0.01)
+search_ip = st.sidebar.text_input("Search IP contains", value="")
+search_ua = st.sidebar.text_input("Search UA contains", value="")
+
+# -----------------------------
+# Header
+# -----------------------------
+st.title("📺 Nginx HLS Viewer + Bot Monitor")
+st.caption("Model status, bot scoring per session, and live session table (Streamlit + Requests + Pandas).")
+
+# -----------------------------
+# Model status
+# -----------------------------
+colA, colB = st.columns([1, 1])
+
+with colA:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("**Model status**")
+
+    status_progress = st.progress(0)
+    status_msg = st.empty()
+
+    with st.spinner("Checking model status..."):
+        status_progress.progress(20)
+        code, model_status = cached_api_get(
+            base_url,
+            "/api/nginx/model/status",
+            tuple([]),
+            (int(connect_timeout), int(read_timeout)),
+            int(retries),
+        )
+        status_progress.progress(70)
+
+    if code == 200 and isinstance(model_status, dict) and model_status.get("model_loaded"):
+        status_msg.success("Model loaded ✅")
+        st.json(model_status)
+    else:
+        err = model_status.get("error") if isinstance(model_status, dict) else None
+        status_msg.error(err or f"Could not load model status (HTTP {code}).")
+        st.json(model_status)
+
+    status_progress.progress(100)
+    time.sleep(0.1)
+    status_progress.empty()
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------- HISTORY TABLE ----------
-st.subheader("Session History")
-if st.session_state.history:
-    st.dataframe(pd.DataFrame(st.session_state.history), use_container_width=True)
-else:
-    st.info("No checks yet.")
+with colB:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("**Quick tips if you see timeout**")
+    st.markdown(
+        """
+        - If your dashboard runs on your PC and API runs on the server, **port 8000 must be open** and allowed in firewall.
+        - Try smaller values first: `tail_lines=200000` and `limit=500`.
+        - Increase **Read timeout** (sidebar) if log parsing takes time.
+        """
+    )
+    st.markdown(f"<span class='pill'>API: {base_url}</span>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("---")
+
+# -----------------------------
+# Bot scoring fetch
+# -----------------------------
+st.subheader("XGBoost bot scoring per session")
+
+bots_params = {
+    "stream_key": stream_key,
+    "window_seconds": int(window_seconds),
+    "tail_lines": int(tail_lines),
+    "limit": int(limit),
+}
+
+# Use refresh button to bust cache
+if refresh:
+    st.cache_data.clear()
+
+progress = st.progress(0)
+msg = st.empty()
+
+msg.info("Loading bot scoring data...")
+progress.progress(15)
+
+with st.spinner("Fetching /api/nginx/bots/score ..."):
+    bots_code, bots = cached_api_get(
+        base_url,
+        "/api/nginx/bots/score",
+        tuple(sorted(bots_params.items(), key=lambda x: x[0])),
+        (int(connect_timeout), int(read_timeout)),
+        int(retries),
+    )
+
+progress.progress(60)
+
+if bots_code != 200 or not isinstance(bots, dict) or bots.get("error"):
+    progress.empty()
+    err_text = (bots or {}).get("error") if isinstance(bots, dict) else None
+    msg.error(err_text or f"Failed to fetch bot scoring (HTTP {bots_code}).")
+    st.code(str(bots), language="json")
+    st.stop()
+
+msg.success("Loaded ✅")
+progress.progress(100)
+time.sleep(0.1)
+progress.empty()
+msg.empty()
+
+summary = bots.get("summary") or {}
+sessions = bots.get("sessions") or []
+
+# -----------------------------
+# Summary metrics
+# -----------------------------
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Sessions scored", summary.get("sessions_scored", len(sessions)))
+m2.metric("Likely bots", summary.get("likely_bots", "—"))
+m3.metric("Likely real", summary.get("likely_real", "—"))
+m4.metric("Threshold", f"{threshold:.2f}")
+
+# -----------------------------
+# Sessions table
+# -----------------------------
+df = flatten_sessions(sessions, threshold=threshold)
+
+if df.empty:
+    st.warning("No sessions returned. Try increasing tail_lines / window_seconds or confirm traffic exists.")
+    st.stop()
+
+# Apply filters
+df_view = df.copy()
+
+if "label" in df_view.columns:
+    df_view = df_view[df_view["label"].isin(label_filter)]
+
+if "bot_probability" in df_view.columns:
+    df_view = df_view[df_view["bot_probability"].fillna(-1) >= float(min_prob)]
+
+if search_ip:
+    df_view = df_view[df_view["ip"].astype(str).str.contains(search_ip, case=False, na=False)]
+
+if search_ua and "ua" in df_view.columns:
+    df_view = df_view[df_view["ua"].astype(str).str.contains(search_ua, case=False, na=False)]
+
+# Compact display columns
+display_cols = [c for c in ["label", "bot_probability", "ip", "ua", "req_count", "m3u8_count", "ts_count", "err_rate", "status_4xx", "gap_mean"] if c in df_view.columns]
+rest_cols = [c for c in df_view.columns if c not in display_cols]
+df_display = df_view[display_cols + rest_cols]
+
+# Show table
+st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+# -----------------------------
+# Drill-down: select a session
+# -----------------------------
+st.markdown("### Session details")
+left, right = st.columns([1, 2])
+
+with left:
+    ip_options = df_view["ip"].dropna().astype(str).unique().tolist()
+    ip_options = sorted(ip_options)
+    selected_ip = st.selectbox("Select IP", ip_options, index=0 if ip_options else None)
+
+with right:
+    if selected_ip:
+        row = df_view[df_view["ip"].astype(str) == str(selected_ip)].head(1)
+        if not row.empty:
+            r = row.iloc[0].to_dict()
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown(f"**IP:** `{r.get('ip','')}`")
+            st.markdown(f"**Label:** `{r.get('label','')}`  |  **bot_probability:** `{r.get('bot_probability')}`")
+            st.markdown(f"**UA:** `{(r.get('ua') or '')[:220]}`")
+            st.markdown("<hr/>", unsafe_allow_html=True)
+
+            # Show key features nicely
+            key_feats = [
+                "req_count", "m3u8_count", "ts_count", "m3u8_ts_ratio",
+                "duration_s", "rps", "gap_mean", "gap_p50", "gap_p95",
+                "err_rate", "status_4xx", "status_5xx",
+                "rt_avg", "rt_p95", "bytes_avg", "bytes_sum",
+            ]
+            feat_show = {k: r.get(k) for k in key_feats if k in r}
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("req_count", feat_show.get("req_count", "—"))
+            c2.metric("m3u8_count", feat_show.get("m3u8_count", "—"))
+            c3.metric("ts_count", feat_show.get("ts_count", "—"))
+
+            st.markdown("**All features (flattened)**")
+            st.json({k: v for k, v in r.items() if k not in ["ip", "ua"]})
+            st.markdown("</div>", unsafe_allow_html=True)
+
+# -----------------------------
+# Quick probability chart (no extra deps)
+# -----------------------------
+if "bot_probability" in df_view.columns and df_view["bot_probability"].notna().any():
+    st.markdown("---")
+    st.markdown("### Probability snapshot")
+    # Take top 30 by prob for readability
+    top = df_view.sort_values("bot_probability", ascending=False).head(30)
+    chart_df = top[["ip", "bot_probability"]].set_index("ip")
+    st.bar_chart(chart_df)
+
+st.caption("If you still see timeouts: try smaller tail_lines/limit first, then increase Read timeout. Also ensure the server allows inbound connections to port 8000.")

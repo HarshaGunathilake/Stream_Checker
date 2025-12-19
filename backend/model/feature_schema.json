@@ -1,0 +1,18 @@
+[
+  "bytes_avg",
+  "bytes_sum",
+  "duration_s",
+  "err_rate",
+  "gap_mean",
+  "gap_p50",
+  "gap_p95",
+  "m3u8_count",
+  "m3u8_ts_ratio",
+  "req_count",
+  "rps",
+  "rt_avg",
+  "rt_p95",
+  "status_4xx",
+  "status_5xx",
+  "ts_count"
+]
